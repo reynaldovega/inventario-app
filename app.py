@@ -1,17 +1,29 @@
-import sqlite3
+import psycopg2
+import os
 import pandas as pd
 import streamlit as st
 import io
+from sqlalchemy import create_engine
 
 # =========================
-# 🔌 CONEXION SQLITE
+# 🔗 CONEXIÓN BASE DE DATOS
 # =========================
-conn = sqlite3.connect("inventario.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    st.error("❌ No se encontró conexión a base de datos")
+    st.stop()
+
+conn = psycopg2.connect(DATABASE_URL)
+engine = create_engine(DATABASE_URL)
 
 # =========================
 # 🔐 LOGIN
 # =========================
-USUARIOS = {"admin": "1234", "rey": "admin"}
+USUARIOS = {
+    "admin": {"password": "1234", "rol": "ADMIN"},
+    "rey": {"password": "admin", "rol": "USER"}
+}
 
 if "login" not in st.session_state:
     st.session_state.login = False
@@ -23,8 +35,9 @@ if not st.session_state.login:
     pwd = st.text_input("Contraseña", type="password")
 
     if st.button("Ingresar"):
-        if user in USUARIOS and USUARIOS[user] == pwd:
+        if user in USUARIOS and pwd == USUARIOS[user]["password"]:
             st.session_state.login = True
+            st.session_state.rol = USUARIOS[user]["rol"]
             st.rerun()
         else:
             st.error("Credenciales incorrectas")
@@ -37,7 +50,7 @@ if not st.session_state.login:
 st.title("📊 Sistema de Inventario")
 
 # =========================
-# 🔄 CARGA DESDE SQLITE
+# 🔄 CARGAR DESDE POSTGRESQL
 # =========================
 try:
     activos = pd.read_sql("SELECT * FROM inventario", conn)
@@ -46,7 +59,7 @@ except:
     activos = None
 
 # =========================
-# 📥 SI NO HAY DATA → SUBIR
+# 📥 SUBIR ARCHIVO (SOLO SI NO HAY DATA)
 # =========================
 if activos is None or activos.empty:
 
@@ -65,7 +78,7 @@ if activos is None or activos.empty:
         df.columns = df.columns.map(lambda x: str(x).strip().upper())
         df = df.loc[:, ~df.columns.duplicated()]
 
-        # 🔍 Detectar columnas dinámicas
+        # 🔍 Columnas dinámicas
         col_dni = [c for c in df.columns if "DNI" in str(c)][0]
         col_activo = [c for c in df.columns if "ACTIVO" in str(c)][0]
         col_estado = [c for c in df.columns if "ESTADO" in str(c)][0]
@@ -73,11 +86,10 @@ if activos is None or activos.empty:
         col_planilla = [c for c in df.columns if "PLANILLA" in str(c)][0]
         col_fecha = [c for c in df.columns if "FECHA" in str(c)][0]
 
-        # opcionales
         col_cargo = next((c for c in df.columns if "CARGO" in str(c)), None)
         col_anexo = next((c for c in df.columns if "CODIGO" in str(c)), None)
 
-        # 🔥 FILTROS
+        # 🔥 Filtros
         df = df[df[col_planilla].astype(str).str.contains("PLANILLA", case=False)]
         df = df[df[col_equipo].astype(str).str.contains("PC|LAPTOP", case=False)]
         df = df.dropna(subset=[col_dni, col_activo, col_estado])
@@ -85,15 +97,15 @@ if activos is None or activos.empty:
         df[col_fecha] = pd.to_datetime(df[col_fecha], errors="coerce")
         df = df.sort_values(by=col_fecha)
 
-        # 🔥 MANTENER TODAS LAS COLUMNAS
+        # 🔥 Último estado por activo
         ultimo = df.drop_duplicates(subset=[col_activo], keep="last")
 
         activos = ultimo[
             ~ultimo[col_estado].astype(str).str.contains("DEVOLUCION", case=False)
         ]
 
-        # 🔥 GUARDAR EN SQLITE
-        activos.to_sql("inventario", conn, if_exists="replace", index=False)
+        # 🔥 GUARDAR EN POSTGRESQL
+        activos.to_sql("inventario", engine, if_exists="replace", index=False)
 
         st.success("✅ Datos guardados correctamente")
         st.rerun()
@@ -101,7 +113,7 @@ if activos is None or activos.empty:
     st.stop()
 
 # =========================
-# 🔎 BUSQUEDA MULTIPLE
+# 🔎 BÚSQUEDA INTELIGENTE
 # =========================
 st.subheader("🔎 Búsqueda inteligente")
 
@@ -116,7 +128,7 @@ if busqueda:
             lambda row: row.str.contains(valor, case=False).any(),
             axis=1
         )
-        filtro_total = filtro_total | filtro
+        filtro_total |= filtro
 
     resultado = activos[filtro_total].drop_duplicates()
 
@@ -127,7 +139,7 @@ if busqueda:
 # 📊 DASHBOARD
 # =========================
 
-# 🔹 POR AREA
+# 🔹 POR ÁREA
 if "CARGO" in activos.columns:
     st.subheader("📊 Equipos por Área")
 
